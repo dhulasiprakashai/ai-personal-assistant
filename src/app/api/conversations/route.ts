@@ -3,6 +3,16 @@ import { getSupabaseClient } from '@/lib/db/supabase';
 
 export async function GET() {
   try {
+    if (process.env.MOCK_DB === 'true') {
+      return NextResponse.json([
+        {
+          id: '11111111-1111-1111-1111-111111111111',
+          title: 'Mock conversation',
+          updated_at: new Date().toISOString()
+        }
+      ]);
+    }
+
     const supabase = getSupabaseClient();
     const { data: conversations, error } = await supabase
       .from('conversations')

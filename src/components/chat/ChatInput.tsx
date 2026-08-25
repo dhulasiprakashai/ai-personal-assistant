@@ -1,15 +1,62 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Sparkles, Settings, Paperclip, Mic, BookOpen, Send } from 'lucide-react';
+import { Sparkles, Settings, Paperclip, Mic, BookOpen, Send, Headphones } from 'lucide-react';
+
+interface SpeechRecognitionErrorEvent extends Event {
+  error: string;
+}
+
+interface SpeechRecognitionEvent extends Event {
+  resultIndex: number;
+  results: {
+    length: number;
+    [index: number]: {
+      isFinal: boolean;
+      [index: number]: {
+        transcript: string;
+      };
+    };
+  };
+}
+
+interface SpeechRecognitionInstance {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onstart: (() => void) | null;
+  onerror: ((event: SpeechRecognitionErrorEvent) => void) | null;
+  onend: (() => void) | null;
+  onresult: ((event: SpeechRecognitionEvent) => void) | null;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
+}
+
+type SpeechRecognitionConstructor = new () => SpeechRecognitionInstance;
 
 interface ChatInputProps {
   onSendMessage: (message: string) => void;
   isLoading: boolean;
   isWelcome: boolean;
+  isContinuousActive: boolean;
+  setIsContinuousActive: (active: boolean) => void;
+  voiceState: 'off' | 'listening' | 'thinking' | 'speaking';
+  setVoiceState: (state: 'off' | 'listening' | 'thinking' | 'speaking') => void;
 }
 
-export default function ChatInput({ onSendMessage, isLoading, isWelcome }: ChatInputProps) {
+export default function ChatInput({
+  onSendMessage,
+  isLoading,
+  isWelcome,
+  isContinuousActive,
+  setIsContinuousActive,
+  voiceState,
+  setVoiceState
+}: ChatInputProps) {
   const [input, setInput] = useState('');
+  const [isListening, setIsListening] = useState(false);
+  const [speechLang, setSpeechLang] = useState('en-US');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
 
   // Auto-resize textarea height
   useEffect(() => {
@@ -21,6 +68,132 @@ export default function ChatInput({ onSendMessage, isLoading, isWelcome }: ChatI
     const minHeight = isWelcome ? 72 : 24;
     textarea.style.height = `${Math.max(textarea.scrollHeight, minHeight)}px`;
   }, [input, isWelcome]);
+
+  // Reactive SpeechRecognition engine start/stop bound to voiceState when continuous is active
+  useEffect(() => {
+    if (!recognitionRef.current || !isContinuousActive) return;
+
+    if (voiceState === 'listening') {
+      try {
+        recognitionRef.current.start();
+      } catch {
+        // Safe catch if already active
+      }
+    } else {
+      try {
+        recognitionRef.current.stop();
+      } catch {
+        // Safe catch if already stopped
+      }
+    }
+  }, [voiceState, isContinuousActive]);
+
+  // Initialize SpeechRecognition
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const SpeechRecognition =
+      ((window as unknown) as { SpeechRecognition?: SpeechRecognitionConstructor; webkitSpeechRecognition?: SpeechRecognitionConstructor }).SpeechRecognition ||
+      ((window as unknown) as { SpeechRecognition?: SpeechRecognitionConstructor; webkitSpeechRecognition?: SpeechRecognitionConstructor }).webkitSpeechRecognition;
+
+    if (SpeechRecognition) {
+      const rec = new SpeechRecognition();
+      rec.continuous = true;
+      rec.interimResults = true;
+      rec.lang = speechLang;
+
+      rec.onstart = () => {
+        setIsListening(true);
+      };
+
+      rec.onerror = (event: SpeechRecognitionErrorEvent) => {
+        console.error('[SPEECH ERROR]', event.error);
+        setIsListening(false);
+      };
+
+      rec.onend = () => {
+        setIsListening(false);
+      };
+
+      rec.onresult = (event: SpeechRecognitionEvent) => {
+        let finalTranscript = '';
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          if (event.results[i].isFinal) {
+            finalTranscript += event.results[i][0].transcript;
+          }
+        }
+        if (finalTranscript && finalTranscript.trim()) {
+          const cleanFinal = finalTranscript.trim();
+          if (isContinuousActive) {
+            try {
+              rec.stop();
+            } catch {}
+            setIsListening(false);
+            setVoiceState('thinking');
+            onSendMessage(cleanFinal);
+          } else {
+            setInput((prev) => {
+              const separator = prev && !prev.endsWith(' ') ? ' ' : '';
+              return prev + separator + cleanFinal;
+            });
+          }
+        }
+      };
+
+      recognitionRef.current = rec;
+    }
+
+    return () => {
+      if (recognitionRef.current) {
+        recognitionRef.current.abort();
+      }
+    };
+  }, [speechLang, isContinuousActive, onSendMessage, setVoiceState]);
+
+  const toggleListening = () => {
+    if (!recognitionRef.current) {
+      alert('Speech Recognition is not supported in this browser. Please try Chrome or Safari.');
+      return;
+    }
+
+    if (isListening) {
+      recognitionRef.current.stop();
+      if (isContinuousActive) {
+        setIsContinuousActive(false);
+        setVoiceState('off');
+      }
+    } else {
+      recognitionRef.current.start();
+      if (isContinuousActive) {
+        setVoiceState('listening');
+      }
+    }
+  };
+
+  const toggleContinuousMode = () => {
+    if (!recognitionRef.current) {
+      alert('Speech Recognition is not supported in this browser. Please try Chrome or Safari.');
+      return;
+    }
+
+    const nextMode = !isContinuousActive;
+    setIsContinuousActive(nextMode);
+
+    if (nextMode) {
+      setVoiceState('listening');
+      try {
+        recognitionRef.current.start();
+      } catch {}
+    } else {
+      setVoiceState('off');
+      try {
+        recognitionRef.current.stop();
+      } catch {}
+      if (typeof window !== 'undefined' && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+      }
+    }
+  };
 
   const handleSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -79,16 +252,54 @@ export default function ChatInput({ onSendMessage, isLoading, isWelcome }: ChatI
 
         {/* Bottom Action bar */}
         <div className="flex items-center justify-between px-4 py-3 bg-slate-50 border-t border-slate-150">
-          {/* Left icons (placeholders) */}
+          {/* Left icons */}
           <div className="flex items-center space-x-4">
             <button type="button" className="flex items-center space-x-1.5 text-xs text-slate-400 hover:text-slate-600 transition-colors font-medium cursor-pointer" aria-label="Attach file">
               <Paperclip className="h-3.5 w-3.5 text-slate-400" />
               <span className="hidden sm:inline">Attach</span>
             </button>
-            <button type="button" className="flex items-center space-x-1.5 text-xs text-slate-400 hover:text-slate-600 transition-colors font-medium cursor-pointer" aria-label="Voice input">
-              <Mic className="h-3.5 w-3.5 text-slate-400" />
-              <span className="hidden sm:inline">Voice</span>
+            <button
+              type="button"
+              onClick={toggleListening}
+              className={`flex items-center space-x-1.5 text-xs transition-colors font-medium cursor-pointer ${
+                isListening
+                  ? 'text-red-600 hover:text-red-500 font-bold animate-pulse'
+                  : 'text-slate-400 hover:text-slate-600'
+              }`}
+              aria-label="Voice input"
+            >
+              <Mic className={`h-3.5 w-3.5 ${isListening ? 'text-red-600' : 'text-slate-400'}`} />
+              <span className="hidden sm:inline">{isListening ? 'Listening...' : 'Voice'}</span>
             </button>
+            <button
+              type="button"
+              onClick={toggleContinuousMode}
+              className={`flex items-center space-x-1.5 text-xs transition-colors font-medium cursor-pointer ${
+                isContinuousActive
+                  ? 'text-indigo-600 hover:text-indigo-500 font-bold animate-pulse'
+                  : 'text-slate-400 hover:text-slate-600'
+              }`}
+              aria-label="Voice Conversation"
+              title="Continuous Voice Conversation"
+            >
+              <Headphones className={`h-3.5 w-3.5 ${isContinuousActive ? 'text-indigo-600' : 'text-slate-400'}`} />
+              <span className="hidden sm:inline">{isContinuousActive ? 'Voice Mode Active' : 'Voice Chat'}</span>
+            </button>
+            <div className="flex items-center space-x-1 border border-slate-200 rounded-lg px-1.5 py-0.5 bg-white shadow-xs">
+              <select
+                value={speechLang}
+                onChange={(e) => setSpeechLang(e.target.value)}
+                className="text-[10px] font-semibold text-slate-500 bg-transparent border-none focus:outline-none focus:ring-0 p-0 cursor-pointer"
+                title="Speech recognition language"
+              >
+                <option value="en-US">English</option>
+                <option value="ta-IN">Tamil (தமிழ்)</option>
+                <option value="hi-IN">Hindi (हिन्दी)</option>
+                <option value="te-IN">Telugu (తెలుగు)</option>
+                <option value="kn-IN">Kannada (ಕನ್ನಡ)</option>
+                <option value="ml-IN">Malayalam (മലയാളം)</option>
+              </select>
+            </div>
             <button type="button" className="flex items-center space-x-1.5 text-xs text-slate-400 hover:text-slate-600 transition-colors font-medium cursor-pointer" aria-label="Prompt library">
               <BookOpen className="h-3.5 w-3.5 text-slate-400" />
               <span className="hidden sm:inline">Prompt library</span>
@@ -136,9 +347,47 @@ export default function ChatInput({ onSendMessage, isLoading, isWelcome }: ChatI
           <button type="button" className="text-slate-400 hover:text-slate-600 p-0.5 rounded-lg transition-colors cursor-pointer" title="Attach file" aria-label="Attach file">
             <Paperclip className="h-4 w-4" />
           </button>
-          <button type="button" className="text-slate-400 hover:text-slate-600 p-0.5 rounded-lg transition-colors cursor-pointer" title="Voice input" aria-label="Voice input">
+          <button
+            type="button"
+            onClick={toggleListening}
+            className={`p-0.5 rounded-lg transition-colors cursor-pointer ${
+              isListening
+                ? 'text-red-600 hover:text-red-500 animate-pulse bg-red-50'
+                : 'text-slate-400 hover:text-slate-600'
+            }`}
+            title={isListening ? 'Stop listening' : 'Voice input'}
+            aria-label="Voice input"
+          >
             <Mic className="h-4 w-4" />
           </button>
+          <button
+            type="button"
+            onClick={toggleContinuousMode}
+            className={`p-0.5 rounded-lg transition-colors cursor-pointer ${
+              isContinuousActive
+                ? 'text-indigo-600 hover:text-indigo-500 animate-pulse bg-indigo-50'
+                : 'text-slate-400 hover:text-slate-600'
+            }`}
+            title={isContinuousActive ? 'Stop Voice Mode' : 'Continuous Voice Conversation'}
+            aria-label="Voice Conversation"
+          >
+            <Headphones className="h-4 w-4" />
+          </button>
+          <div className="flex items-center space-x-1 border border-slate-200 rounded-lg px-1.5 py-0.5 bg-white shadow-xs">
+            <select
+              value={speechLang}
+              onChange={(e) => setSpeechLang(e.target.value)}
+              className="text-[10px] font-semibold text-slate-500 bg-transparent border-none focus:outline-none focus:ring-0 p-0 cursor-pointer"
+              title="Speech recognition language"
+            >
+              <option value="en-US">EN</option>
+              <option value="ta-IN">TA</option>
+              <option value="hi-IN">HI</option>
+              <option value="te-IN">TE</option>
+              <option value="kn-IN">KN</option>
+              <option value="ml-IN">ML</option>
+            </select>
+          </div>
           <button type="button" className="text-slate-400 hover:text-slate-600 p-0.5 rounded-lg transition-colors cursor-pointer" title="Prompt library" aria-label="Prompt library">
             <BookOpen className="h-4 w-4" />
           </button>

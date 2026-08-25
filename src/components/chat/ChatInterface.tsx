@@ -5,7 +5,7 @@ import { Message, ChatResponse } from '@/types/chat';
 import ChatMessage from './ChatMessage';
 import ChatInput from './ChatInput';
 import TypingIndicator from './TypingIndicator';
-import { Sparkles, MessageSquare, AlertCircle, Plus, Search, Folder, ClipboardList, FileText, History, Settings, Menu, X } from 'lucide-react';
+import { Sparkles, MessageSquare, AlertCircle, Plus, Search, Folder, ClipboardList, FileText, History, Settings, Menu, X, Volume2, VolumeX } from 'lucide-react';
 
 const generateId = (): string => {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
@@ -24,6 +24,23 @@ const quickPromptMap: Record<string, string> = {
   'Surprise me': 'Surprise me with a unique AI insight.',
 };
 
+function detectLanguage(text: string): string {
+  const patterns = [
+    { lang: 'ta-IN', regex: /[\u0B80-\u0BFF]/ }, // Tamil
+    { lang: 'hi-IN', regex: /[\u0900-\u097F]/ }, // Hindi
+    { lang: 'te-IN', regex: /[\u0C00-\u0C7F]/ }, // Telugu
+    { lang: 'kn-IN', regex: /[\u0C80-\u0CFF]/ }, // Kannada
+    { lang: 'ml-IN', regex: /[\u0D00-\u0D7F]/ }, // Malayalam
+  ];
+
+  for (const pattern of patterns) {
+    if (pattern.regex.test(text)) {
+      return pattern.lang;
+    }
+  }
+  return 'en-US';
+}
+
 export default function ChatInterface() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -31,12 +48,108 @@ export default function ChatInterface() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const [conversationsList, setConversationsList] = useState<Array<{ id: string; title: string; updated_at: string }>>([]);
+  const [isMuted, setIsMuted] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('aura_is_muted') === 'true';
+    }
+    return false;
+  });
+  const [currentlySpeakingId, setCurrentlySpeakingId] = useState<string | null>(null);
+  const [isContinuousActive, setIsContinuousActive] = useState(false);
+  const [voiceState, setVoiceState] = useState<'off' | 'listening' | 'thinking' | 'speaking'>('off');
+  const spokenMessageIdsRef = useRef<Set<string>>(new Set());
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll to bottom of chat
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  useEffect(() => {
+    return () => {
+      if (typeof window !== 'undefined' && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+      }
+    };
+  }, []);
+
+  const speakText = (text: string, messageId: string) => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) return;
+
+    if (currentlySpeakingId === messageId) {
+      window.speechSynthesis.cancel();
+      setCurrentlySpeakingId(null);
+      return;
+    }
+
+    window.speechSynthesis.cancel();
+
+    if (isMuted) return;
+
+    const cleanText = text
+      .replace(/[*#`_\-]/g, '')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+      .trim();
+
+    if (!cleanText) return;
+
+    const utterance = new SpeechSynthesisUtterance(cleanText);
+    
+    utterance.onstart = () => {
+      setCurrentlySpeakingId(messageId);
+      setVoiceState('speaking');
+    };
+
+    utterance.onend = () => {
+      setCurrentlySpeakingId(null);
+      if (isContinuousActive) {
+        setVoiceState('listening');
+      } else {
+        setVoiceState('off');
+      }
+    };
+
+    utterance.onerror = () => {
+      setCurrentlySpeakingId(null);
+      if (isContinuousActive) {
+        setVoiceState('listening');
+      } else {
+        setVoiceState('off');
+      }
+    };
+
+    const targetLang = detectLanguage(cleanText);
+    utterance.lang = targetLang;
+
+    const voices = window.speechSynthesis.getVoices();
+    let matchingVoice = voices.find(v => v.lang.toLowerCase().startsWith(targetLang.toLowerCase()));
+    
+    // Closest primary fallback (e.g. ta or hi match prefix)
+    if (!matchingVoice) {
+      const primary = targetLang.split('-')[0];
+      matchingVoice = voices.find(v => v.lang.toLowerCase().startsWith(primary.toLowerCase()));
+    }
+    
+    if (matchingVoice) {
+      utterance.voice = matchingVoice;
+    }
+
+    window.speechSynthesis.speak(utterance);
+  };
+
+  const toggleMute = () => {
+    setIsMuted((prev) => {
+      const next = !prev;
+      localStorage.setItem('aura_is_muted', String(next));
+      if (next) {
+        if (typeof window !== 'undefined' && window.speechSynthesis) {
+          window.speechSynthesis.cancel();
+        }
+        setCurrentlySpeakingId(null);
+      }
+      return next;
+    });
   };
 
   useEffect(() => {
@@ -87,6 +200,10 @@ export default function ChatInterface() {
 
   const handleSelectConversation = (id: string) => {
     if (id === currentConversationId) return;
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+    setCurrentlySpeakingId(null);
     setCurrentConversationId(id);
     localStorage.setItem('aura_current_conversation_id', id);
     fetchHistory(id);
@@ -94,6 +211,13 @@ export default function ChatInterface() {
   };
 
   const handleSendMessage = async (content: string) => {
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+    setCurrentlySpeakingId(null);
+    if (isContinuousActive) {
+      setVoiceState('thinking');
+    }
     setError(null);
     const userMessage: Message = {
       id: generateId(),
@@ -137,6 +261,16 @@ export default function ChatInterface() {
 
       setMessages((prev) => [...prev, assistantMessage]);
       
+      // Auto-read aloud if unmuted and not already spoken
+      if (!isMuted && !spokenMessageIdsRef.current.has(assistantMessage.id)) {
+        spokenMessageIdsRef.current.add(assistantMessage.id);
+        speakText(data.message, assistantMessage.id);
+      } else {
+        if (isContinuousActive) {
+          setVoiceState('listening');
+        }
+      }
+      
       if (!currentConversationId && data.conversationId) {
         setCurrentConversationId(data.conversationId);
         localStorage.setItem('aura_current_conversation_id', data.conversationId);
@@ -147,6 +281,9 @@ export default function ChatInterface() {
       console.error(err);
       const errorMsg = err instanceof Error ? err.message : String(err);
       setError(errorMsg || 'An unexpected error occurred. Please check your connection.');
+      if (isContinuousActive) {
+        setVoiceState('listening');
+      }
     } finally {
       setIsLoading(false);
     }
@@ -158,6 +295,10 @@ export default function ChatInterface() {
   };
 
   const clearChat = () => {
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+    setCurrentlySpeakingId(null);
     setMessages([]);
     setError(null);
     setCurrentConversationId(null);
@@ -319,21 +460,48 @@ export default function ChatInterface() {
               >
                 <Menu className="h-4.5 w-4.5" />
               </button>
-              <h2 className="text-xs font-bold text-slate-700 tracking-wide uppercase select-none">
-                {currentConversationId 
-                  ? (conversationsList.find(c => c.id === currentConversationId)?.title || "Active chat")
-                  : "New chat"
-                }
+              <h2 className="text-xs font-bold text-slate-700 tracking-wide uppercase select-none flex items-center space-x-2">
+                <span>
+                  {currentConversationId 
+                    ? (conversationsList.find(c => c.id === currentConversationId)?.title || "Active chat")
+                    : "New chat"
+                  }
+                </span>
+                {isContinuousActive && (
+                  <span className="flex items-center space-x-1.5 ml-2 normal-case text-[10px] font-semibold text-slate-500 bg-slate-100 border border-slate-200 rounded-full px-2 py-0.5 animate-pulse">
+                    <span className={`h-1.5 w-1.5 rounded-full ${
+                      voiceState === 'listening' ? 'bg-red-500 animate-ping' :
+                      voiceState === 'thinking' ? 'bg-amber-500 animate-spin border border-slate-300' :
+                      voiceState === 'speaking' ? 'bg-indigo-500 animate-bounce' : 'bg-slate-400'
+                    }`} />
+                    <span className="capitalize">{voiceState}</span>
+                  </span>
+                )}
               </h2>
             </div>
             
-            <button
-              onClick={clearChat}
-              className="flex items-center space-x-1.5 px-3 py-1.5 text-xs text-indigo-600 hover:text-indigo-700 bg-indigo-50 hover:bg-indigo-100/80 border border-indigo-100/60 rounded-xl transition-all cursor-pointer font-semibold animate-fade-in"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              <span>New chat</span>
-            </button>
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={toggleMute}
+                className={`flex items-center justify-center p-2 rounded-xl border transition-all cursor-pointer ${
+                  isMuted
+                    ? 'text-slate-400 bg-slate-50 border-slate-200 hover:bg-slate-100'
+                    : 'text-indigo-600 bg-indigo-50 border-indigo-150 hover:bg-indigo-100/80'
+                }`}
+                title={isMuted ? 'Unmute Aura' : 'Mute Aura'}
+                aria-label={isMuted ? 'Unmute Aura' : 'Mute Aura'}
+              >
+                {isMuted ? <VolumeX className="h-4.5 w-4.5" /> : <Volume2 className="h-4.5 w-4.5" />}
+              </button>
+
+              <button
+                onClick={clearChat}
+                className="flex items-center space-x-1.5 px-3 py-1.5 text-xs text-indigo-600 hover:text-indigo-700 bg-indigo-50 hover:bg-indigo-100/80 border border-indigo-100/60 rounded-xl transition-all cursor-pointer font-semibold animate-fade-in"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                <span>New chat</span>
+              </button>
+            </div>
           </header>
 
           {/* Chat / Welcome Workspace Content */}
@@ -353,7 +521,7 @@ export default function ChatInterface() {
                 </p>
 
                 {/* Card Composer */}
-                <ChatInput onSendMessage={handleSendMessage} isLoading={isLoading} isWelcome={true} />
+                <ChatInput onSendMessage={handleSendMessage} isLoading={isLoading} isWelcome={true} isContinuousActive={isContinuousActive} setIsContinuousActive={setIsContinuousActive} voiceState={voiceState} setVoiceState={setVoiceState} />
 
                 {/* Quick Prompts */}
                 <div className="mt-8 w-full max-w-xl">
@@ -381,7 +549,7 @@ export default function ChatInterface() {
               // Active Message Threads
               <div className="flex-grow">
                 {messages.map((message) => (
-                  <ChatMessage key={message.id} message={message} />
+                  <ChatMessage key={message.id} message={message} onSpeak={speakText} isCurrentlySpeaking={currentlySpeakingId === message.id} />
                 ))}
                 
                 {isLoading && (
@@ -408,7 +576,7 @@ export default function ChatInterface() {
                   </div>
                 )}
                 
-                <ChatInput onSendMessage={handleSendMessage} isLoading={isLoading} isWelcome={false} />
+                <ChatInput onSendMessage={handleSendMessage} isLoading={isLoading} isWelcome={false} isContinuousActive={isContinuousActive} setIsContinuousActive={setIsContinuousActive} voiceState={voiceState} setVoiceState={setVoiceState} />
                 
                 <p className="text-[9px] text-center text-slate-400 font-semibold select-none">
                   Aura can make mistakes. Verify important information.

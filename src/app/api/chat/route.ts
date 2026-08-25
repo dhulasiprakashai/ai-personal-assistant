@@ -1,11 +1,60 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getChatCompletionWithHistory, SYSTEM_INSTRUCTION } from '@/lib/ai/openai';
-import { getGeminiCompletionWithHistory } from '@/lib/ai/gemini';
+import { getGeminiCompletionWithHistory, extractMemoryCandidates } from '@/lib/ai/gemini';
 import { getSupabaseClient } from '@/lib/db/supabase';
+import { dbSaveMemory, dbGetMemories } from '@/lib/db/memoriesDb';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const mockConversations = new Map<string, Array<{ role: 'user' | 'assistant'; content: string }>>();
+
+async function extractAndSaveMemory(message: string, conversationId: string) {
+  console.log('[MEMORY] Checking message for memory candidates...');
+  const candidates = await extractMemoryCandidates(message);
+  if (candidates.length === 0) {
+    console.log('[MEMORY] No memory candidates found in message.');
+    return;
+  }
+  
+  console.log(`[MEMORY] Found ${candidates.length} candidate(s):`, JSON.stringify(candidates));
+  
+  for (const candidate of candidates) {
+    const { key, value } = candidate;
+    const lowerKey = key.toLowerCase();
+    if (
+      lowerKey.includes('key') || 
+      lowerKey.includes('password') || 
+      lowerKey.includes('token') || 
+      lowerKey.includes('secret') || 
+      lowerKey.includes('auth') || 
+      lowerKey.includes('credential')
+    ) {
+      console.warn(`[MEMORY WARNING] Blocked saving of potentially sensitive memory key: ${key}`);
+      continue;
+    }
+
+    const lowerVal = value.toLowerCase();
+    const isSensitiveVal = 
+      lowerVal.includes('key=') || 
+      lowerVal.includes('api_key') || 
+      lowerVal.includes('bearer ') || 
+      /^[a-zA-Z0-9_-]{32,}$/.test(value) || 
+      lowerVal.includes('password') ||
+      lowerVal.includes('secret');
+      
+    if (isSensitiveVal) {
+      console.warn(`[MEMORY WARNING] Blocked saving of potentially sensitive memory value.`);
+      continue;
+    }
+
+    try {
+      await dbSaveMemory(conversationId, key, value);
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[MEMORY ERROR] Failed to save memory for key ${key}:`, errMsg);
+    }
+  }
+}
 
 
 export async function GET(req: NextRequest) {
@@ -127,6 +176,14 @@ export async function POST(req: NextRequest) {
       console.warn('[CHAT ERROR] Message cannot be empty or whitespace only');
       return NextResponse.json(
         { error: 'Message cannot be empty or whitespace only' },
+        { status: 400 }
+      );
+    }
+
+    if (trimmedMessage.length > 5000) {
+      console.warn('[CHAT ERROR] Message exceeds maximum allowed length of 5000 characters');
+      return NextResponse.json(
+        { error: 'Message exceeds maximum allowed length of 5000 characters' },
         { status: 400 }
       );
     }
@@ -264,6 +321,13 @@ export async function POST(req: NextRequest) {
       console.log(`[CHAT] Previous messages loaded: ${dbMessages.length} messages`);
     }
 
+    // Extract and store memories in the background
+    try {
+      await extractAndSaveMemory(trimmedMessage, activeConversationId);
+    } catch (memError) {
+      console.error('[MEMORY ERROR] Failed to extract/save memory:', memError);
+    }
+
 
     // Build messages array for OpenAI
     const openAIMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
@@ -273,6 +337,24 @@ export async function POST(req: NextRequest) {
         content: msg.content as string,
       })),
     ];
+
+    // Fetch memories to inject as context
+    let memoriesText = '';
+    try {
+      const mems = await dbGetMemories(conversationId);
+      if (mems.length > 0) {
+        // De-duplicate using Map to keep the latest one
+        const uniqueMemsMap = new Map<string, string>();
+        for (const m of mems) {
+          uniqueMemsMap.set(m.key, m.value);
+        }
+        const uniqueMems = Array.from(uniqueMemsMap.entries());
+        memoriesText = 'Known user memories:\n' + uniqueMems.map(([k, v]) => `- ${k}: ${v}`).join('\n');
+        console.log(`[MEMORY] Loaded ${uniqueMems.length} unique memory/memories for context injection.`);
+      }
+    } catch (err) {
+      console.error('[MEMORY ERROR] Failed to retrieve memories:', err);
+    }
 
     // Call AI service (Gemini or OpenAI)
     const isGeminiKey = (key?: string) => !!key && (key.startsWith('AQ.') || key.startsWith('AIza') || !key.startsWith('sk-'));
@@ -284,7 +366,7 @@ export async function POST(req: NextRequest) {
     if (aiProvider === 'gemini') {
       console.log('[CHAT] Calling Gemini API...');
       try {
-        responseText = await getGeminiCompletionWithHistory(openAIMessages);
+        responseText = await getGeminiCompletionWithHistory(openAIMessages, memoriesText, conversationId);
         console.log('[CHAT] Gemini response received successfully');
       } catch (geminiError: unknown) {
         const error = geminiError instanceof Error ? geminiError : new Error(String(geminiError));
