@@ -189,12 +189,45 @@ export default function ChatInterface() {
 
   useEffect(() => {
     const savedId = localStorage.getItem('aura_current_conversation_id');
-    setTimeout(() => {
-      if (savedId) {
-        setCurrentConversationId(savedId);
-        fetchHistory(savedId);
+    const initChat = async () => {
+      try {
+        const response = await fetch('/api/conversations');
+        if (response.ok) {
+          const data = await response.json();
+          setConversationsList(data);
+          
+          if (savedId) {
+            const exists = data.some((conv: { id: string }) => conv.id === savedId);
+            if (exists) {
+              setCurrentConversationId(savedId);
+              fetchHistory(savedId);
+            } else {
+              console.warn(`Stale or invalid conversation ID detected: ${savedId}. Clearing from localStorage.`);
+              localStorage.removeItem('aura_current_conversation_id');
+              setCurrentConversationId(null);
+            }
+          }
+        } else {
+          // Fallback if the conversations list couldn't be loaded
+          if (savedId) {
+            setCurrentConversationId(savedId);
+            fetchHistory(savedId);
+          }
+          fetchConversations();
+        }
+      } catch (err) {
+        console.error('Error initializing chat:', err);
+        // Fallback
+        if (savedId) {
+          setCurrentConversationId(savedId);
+          fetchHistory(savedId);
+        }
+        fetchConversations();
       }
-      fetchConversations();
+    };
+
+    setTimeout(() => {
+      initChat();
     }, 0);
   }, []);
 
@@ -246,6 +279,10 @@ export default function ChatInterface() {
         try {
           const errData = await response.json();
           errMessage = errData.error || errMessage;
+          if (response.status === 400 && (errMessage.includes('invalid conversation ID') || errMessage.includes('not found'))) {
+            localStorage.removeItem('aura_current_conversation_id');
+            setCurrentConversationId(null);
+          }
         } catch {}
         throw new Error(errMessage);
       }

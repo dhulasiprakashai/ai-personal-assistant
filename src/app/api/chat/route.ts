@@ -6,7 +6,9 @@ import { dbSaveMemory, dbGetMemories } from '@/lib/db/memoriesDb';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-const mockConversations = new Map<string, Array<{ role: 'user' | 'assistant'; content: string }>>();
+const mockConversations = new Map<string, Array<{ role: 'user' | 'assistant'; content: string }>>([
+  ['11111111-1111-1111-1111-111111111111', []]
+]);
 
 async function extractAndSaveMemory(message: string, conversationId: string) {
   console.log('[MEMORY] Checking message for memory candidates...');

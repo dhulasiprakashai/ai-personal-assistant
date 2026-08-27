@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Sparkles, Settings, Paperclip, Mic, BookOpen, Send, Headphones } from 'lucide-react';
+import { Sparkles, Settings, Paperclip, Mic, BookOpen, Send, Headphones, AlertCircle } from 'lucide-react';
 
 interface SpeechRecognitionErrorEvent extends Event {
   error: string;
@@ -55,8 +55,12 @@ export default function ChatInput({
   const [input, setInput] = useState('');
   const [isListening, setIsListening] = useState(false);
   const [speechLang, setSpeechLang] = useState('en-US');
+  const [speechError, setSpeechError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
+  const isRecognitionActiveRef = useRef(false);
+  const isStoppingRef = useRef(false);
+  const hasLoggedErrorRef = useRef(false);
 
   // Auto-resize textarea height
   useEffect(() => {
@@ -74,16 +78,22 @@ export default function ChatInput({
     if (!recognitionRef.current || !isContinuousActive) return;
 
     if (voiceState === 'listening') {
-      try {
-        recognitionRef.current.start();
-      } catch {
-        // Safe catch if already active
+      if (!isRecognitionActiveRef.current && !isStoppingRef.current) {
+        try {
+          recognitionRef.current.start();
+        } catch (e) {
+          console.warn('[SPEECH] recognition.start() failed:', e);
+        }
       }
     } else {
-      try {
-        recognitionRef.current.stop();
-      } catch {
-        // Safe catch if already stopped
+      if (isRecognitionActiveRef.current && !isStoppingRef.current) {
+        isStoppingRef.current = true;
+        try {
+          recognitionRef.current.stop();
+        } catch (e) {
+          console.warn('[SPEECH] recognition.stop() failed:', e);
+          isStoppingRef.current = false;
+        }
       }
     }
   }, [voiceState, isContinuousActive]);
@@ -103,16 +113,54 @@ export default function ChatInput({
       rec.lang = speechLang;
 
       rec.onstart = () => {
+        isRecognitionActiveRef.current = true;
+        hasLoggedErrorRef.current = false;
         setIsListening(true);
+        setSpeechError(null);
       };
 
       rec.onerror = (event: SpeechRecognitionErrorEvent) => {
-        console.error('[SPEECH ERROR]', event.error);
         setIsListening(false);
+        
+        if (event.error === 'audio-capture' || event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+          if (!hasLoggedErrorRef.current) {
+            console.error('[SPEECH ERROR]', event.error);
+            hasLoggedErrorRef.current = true;
+          }
+          setSpeechError(
+            'Microphone could not be accessed. Check your microphone connection and browser permission.'
+          );
+          setIsContinuousActive(false);
+          setVoiceState('off');
+        } else if (event.error === 'aborted') {
+          console.debug('[SPEECH INFO] Speech recognition was aborted/interrupted.');
+        } else if (event.error !== 'no-speech') {
+          if (!hasLoggedErrorRef.current) {
+            console.error('[SPEECH ERROR]', event.error);
+            hasLoggedErrorRef.current = true;
+          }
+          setSpeechError(`Speech recognition error: ${event.error}`);
+        }
       };
 
       rec.onend = () => {
+        isRecognitionActiveRef.current = false;
+        isStoppingRef.current = false;
         setIsListening(false);
+
+        // If continuous mode is active and we are still in listening state,
+        // we should restart recognition safely (since it might have stopped naturally due to silence/timeout)
+        if (isContinuousActive && voiceState === 'listening') {
+          setTimeout(() => {
+            if (isContinuousActive && voiceState === 'listening' && !isRecognitionActiveRef.current && !isStoppingRef.current) {
+              try {
+                rec.start();
+              } catch (e) {
+                console.warn('[SPEECH] Auto-restart failed:', e);
+              }
+            }
+          }, 100);
+        }
       };
 
       rec.onresult = (event: SpeechRecognitionEvent) => {
@@ -125,9 +173,12 @@ export default function ChatInput({
         if (finalTranscript && finalTranscript.trim()) {
           const cleanFinal = finalTranscript.trim();
           if (isContinuousActive) {
-            try {
-              rec.stop();
-            } catch {}
+            if (isRecognitionActiveRef.current && !isStoppingRef.current) {
+              isStoppingRef.current = true;
+              try {
+                rec.stop();
+              } catch {}
+            }
             setIsListening(false);
             setVoiceState('thinking');
             onSendMessage(cleanFinal);
@@ -146,6 +197,7 @@ export default function ChatInput({
     return () => {
       if (recognitionRef.current) {
         recognitionRef.current.abort();
+        recognitionRef.current = null;
       }
     };
   }, [speechLang, isContinuousActive, onSendMessage, setVoiceState]);
@@ -157,15 +209,30 @@ export default function ChatInput({
     }
 
     if (isListening) {
-      recognitionRef.current.stop();
+      if (isRecognitionActiveRef.current && !isStoppingRef.current) {
+        isStoppingRef.current = true;
+        try {
+          recognitionRef.current.stop();
+        } catch (e) {
+          console.warn('[SPEECH] manual stop failed:', e);
+          isStoppingRef.current = false;
+        }
+      }
       if (isContinuousActive) {
         setIsContinuousActive(false);
         setVoiceState('off');
       }
     } else {
-      recognitionRef.current.start();
-      if (isContinuousActive) {
-        setVoiceState('listening');
+      if (!isRecognitionActiveRef.current && !isStoppingRef.current) {
+        setSpeechError(null);
+        try {
+          recognitionRef.current.start();
+          if (isContinuousActive) {
+            setVoiceState('listening');
+          }
+        } catch (e) {
+          console.warn('[SPEECH] manual start failed:', e);
+        }
       }
     }
   };
@@ -181,14 +248,25 @@ export default function ChatInput({
 
     if (nextMode) {
       setVoiceState('listening');
-      try {
-        recognitionRef.current.start();
-      } catch {}
+      if (!isRecognitionActiveRef.current && !isStoppingRef.current) {
+        setSpeechError(null);
+        try {
+          recognitionRef.current.start();
+        } catch (e) {
+          console.warn('[SPEECH] continuous start failed:', e);
+        }
+      }
     } else {
       setVoiceState('off');
-      try {
-        recognitionRef.current.stop();
-      } catch {}
+      if (isRecognitionActiveRef.current && !isStoppingRef.current) {
+        isStoppingRef.current = true;
+        try {
+          recognitionRef.current.stop();
+        } catch (e) {
+          console.warn('[SPEECH] continuous stop failed:', e);
+          isStoppingRef.current = false;
+        }
+      }
       if (typeof window !== 'undefined' && window.speechSynthesis) {
         window.speechSynthesis.cancel();
       }
@@ -234,6 +312,20 @@ export default function ChatInput({
             <Settings className="h-3.5 w-3.5" />
           </button>
         </div>
+
+        {speechError && (
+          <div className="mx-4 mt-3 flex items-center space-x-2 p-2.5 text-xs bg-rose-50 border border-rose-100 text-rose-600 rounded-xl select-none">
+            <AlertCircle className="h-4 w-4 shrink-0 text-rose-500" />
+            <p className="flex-1 font-medium text-left">{speechError}</p>
+            <button 
+              type="button" 
+              onClick={() => setSpeechError(null)} 
+              className="text-rose-450 hover:text-rose-600 font-bold transition-colors cursor-pointer text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded-md hover:bg-rose-100"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
 
         {/* Text Input area */}
         <div className="p-4 flex-1">
@@ -326,6 +418,19 @@ export default function ChatInput({
   // Active Chat compact composer layout
   return (
     <form onSubmit={handleSubmit} className="w-full bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden flex flex-col">
+      {speechError && (
+        <div className="mx-4 mt-3 flex items-center space-x-2 p-2.5 text-xs bg-rose-50 border border-rose-100 text-rose-600 rounded-xl select-none">
+          <AlertCircle className="h-4 w-4 shrink-0 text-rose-500" />
+          <p className="flex-1 font-medium text-left">{speechError}</p>
+          <button 
+            type="button" 
+            onClick={() => setSpeechError(null)} 
+            className="text-rose-450 hover:text-rose-600 font-bold transition-colors cursor-pointer text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded-md hover:bg-rose-100"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
       {/* Input field */}
       <div className="px-4 py-3 flex-1 flex items-end space-x-3">
         <textarea
