@@ -5,13 +5,23 @@ import { sanitizeAndValidateKey, sanitizeAndValidateValue } from '../../../lib/a
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function validateConversationId(conversationId: string | null): string {
+  const isMock = process.env.MOCK_DB === 'true';
+
   if (!conversationId) {
-    return 'default-session';
+    if (isMock) {
+      return 'default-session';
+    }
+    throw new Error('Security Exception: Missing required conversation ID');
   }
+
   const trimmed = conversationId.trim();
-  if (trimmed === 'default' || trimmed === 'default-session' || trimmed === 'conv-123') {
-    return trimmed;
+
+  if (isMock) {
+    if (trimmed === 'default' || trimmed === 'default-session' || trimmed === 'conv-123') {
+      return trimmed;
+    }
   }
+
   if (!UUID_REGEX.test(trimmed)) {
     throw new Error('Security Exception: Invalid conversation ID format');
   }
