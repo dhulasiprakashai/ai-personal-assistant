@@ -62,6 +62,22 @@ export default function ChatInput({
   const isStoppingRef = useRef(false);
   const hasLoggedErrorRef = useRef(false);
 
+  const isContinuousActiveValRef = useRef(isContinuousActive);
+  const voiceStateValRef = useRef(voiceState);
+  const setIsContinuousActiveRef = useRef(setIsContinuousActive);
+
+  useEffect(() => {
+    isContinuousActiveValRef.current = isContinuousActive;
+  }, [isContinuousActive]);
+
+  useEffect(() => {
+    voiceStateValRef.current = voiceState;
+  }, [voiceState]);
+
+  useEffect(() => {
+    setIsContinuousActiveRef.current = setIsContinuousActive;
+  }, [setIsContinuousActive]);
+
   // Auto-resize textarea height
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -130,7 +146,7 @@ export default function ChatInput({
           setSpeechError(
             'Microphone could not be accessed. Check your microphone connection and browser permission.'
           );
-          setIsContinuousActive(false);
+          setIsContinuousActiveRef.current(false);
           setVoiceState('off');
         } else if (event.error === 'aborted') {
           console.debug('[SPEECH INFO] Speech recognition was aborted/interrupted.');
@@ -150,9 +166,9 @@ export default function ChatInput({
 
         // If continuous mode is active and we are still in listening state,
         // we should restart recognition safely (since it might have stopped naturally due to silence/timeout)
-        if (isContinuousActive && voiceState === 'listening') {
+        if (isContinuousActiveValRef.current && voiceStateValRef.current === 'listening') {
           setTimeout(() => {
-            if (isContinuousActive && voiceState === 'listening' && !isRecognitionActiveRef.current && !isStoppingRef.current) {
+            if (isContinuousActiveValRef.current && voiceStateValRef.current === 'listening' && !isRecognitionActiveRef.current && !isStoppingRef.current) {
               try {
                 rec.start();
               } catch (e) {
@@ -172,7 +188,7 @@ export default function ChatInput({
         }
         if (finalTranscript && finalTranscript.trim()) {
           const cleanFinal = finalTranscript.trim();
-          if (isContinuousActive) {
+          if (isContinuousActiveValRef.current) {
             if (isRecognitionActiveRef.current && !isStoppingRef.current) {
               isStoppingRef.current = true;
               try {
@@ -200,7 +216,7 @@ export default function ChatInput({
         recognitionRef.current = null;
       }
     };
-  }, [speechLang, isContinuousActive, onSendMessage, setVoiceState]);
+  }, [speechLang, onSendMessage, setVoiceState]);
 
   const toggleListening = () => {
     if (!recognitionRef.current) {
